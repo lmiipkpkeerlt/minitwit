@@ -1,0 +1,11 @@
+FROM gcc:latest
+
+WORKDIR /app
+
+COPY flag_tool.c /app/
+
+RUN apt-get update && apt-get install -y libsqlite3-dev
+
+RUN gcc flag_tool.c -l sqlite3 -o flag_tool
+
+CMD ["bash"]

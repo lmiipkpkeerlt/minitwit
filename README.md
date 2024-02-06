@@ -1,0 +1,1 @@
+smol twitter clone used for the DevOps course at the IT University of Copenhagen
