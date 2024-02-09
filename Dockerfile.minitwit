@@ -5,13 +5,9 @@ WORKDIR /data
 COPY schema.sql /data/
 
 RUN apt-get -y update && \
-    apt-get -y upgrade && \
-    apt-get -y install libsqlite3-dev && \
-    apt-get -y install sqlite3
+    apt-get -y install sqlite3 
 
 RUN sh -c "if [ ! -f minitwit.db ]; then sqlite3 minitwit.db < schema.sql; fi"
-
-EXPOSE 5000
 
 # Keeps Python from generating .pyc files in the container
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -19,12 +15,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Turns off buffering for easier container logging
 ENV PYTHONUNBUFFERED=1
 
-COPY requirements.txt .
-
-RUN python -m pip install -r requirements.txt
-
 WORKDIR /app
 
 COPY . /app
+
+RUN python -m pip install -r requirements.txt
+
+EXPOSE 5000
 
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "minitwit:app"]
