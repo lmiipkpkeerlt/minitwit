@@ -1,13 +1,6 @@
 version: '3.4'
 
 services:
-  init-db:
-    build:
-      context: .
-      dockerfile: ./Dockerfile.init-db
-    volumes:
-      - minitwit:/data
-
   minitwit:
     build:
       context: .
@@ -16,8 +9,6 @@ services:
       - 5000:5000
     volumes:
       - minitwit:/data
-    depends_on:
-      - init-db
 
 volumes:
   minitwit:
