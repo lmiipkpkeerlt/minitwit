@@ -1,0 +1,9 @@
+FROM mongo:latest
+
+CMD docker-entrypoint.sh mongod
+
+# RESTORE FROM DATABASE DUMP
+# CMD mongod --fork --logpath /var/log/mongodb.log; \
+#     mongorestore --gzip /tmp/dump/mydb/; \
+#     mongod --shutdown; \
+#     docker-entrypoint.sh mongod

@@ -1,91 +1,51 @@
-# -*- coding: utf-8 -*-
-"""
-    MiniTwit
-    ~~~~~~~~
+import os
+import pytz
+import datetime
 
-    A microblogging application written with Flask and sqlite3.
-
-    :copyright: (c) 2010 by Armin Ronacher.
-    :license: BSD, see LICENSE for more details.
-"""
-
-import re
-import time
-import sqlite3
 from hashlib import md5
-from datetime import datetime
-from contextlib import closing
 from flask import Flask, request, session, url_for, redirect, \
-     render_template, abort, g, flash
+    render_template, abort, g, flash
 from werkzeug.security import check_password_hash, generate_password_hash
-
-
-# configuration
-DATABASE = '/data/minitwit.db'
-PER_PAGE = 30
-DEBUG = True
-SECRET_KEY = 'development key'
+from flask_pymongo import PyMongo
+from bson.objectid import ObjectId
 
 # create our little application :)
 app = Flask(__name__)
+db_ip = os.getenv('DB_IP')
+app.config["MONGO_URI"] = f"mongodb://{db_ip}:27017/test"
+# setup mongodb
+mongo = PyMongo(app)
 
-
-def connect_db():
-    """Returns a new connection to the database."""
-    return sqlite3.connect(DATABASE)
-
-
-def init_db():
-    """Creates the database tables."""
-    with closing(connect_db()) as db:
-        with open('schema.sql', mode='r', encoding='utf-8') as f:
-              db.cursor().executescript(f.read())
-        db.commit()
-
-
-def query_db(query, args=(), one=False):
-    """Queries the database and returns a list of dictionaries."""
-    cur = g.db.execute(query, args)
-    rv = [dict((cur.description[idx][0], value)
-               for idx, value in enumerate(row)) for row in cur.fetchall()]
-    return (rv[0] if rv else None) if one else rv
+# Load default config and override config from an environment variable
+app.config.update(dict(
+    DEBUG=True,
+    SECRET_KEY='development key'))
+app.config.from_envvar('MINITWIT_SETTINGS', silent=True)
 
 
 def get_user_id(username):
     """Convenience method to look up the id for a username."""
-    rv = g.db.execute('select user_id from user where username = ?',
-                       [username]).fetchone()
-    return rv[0] if rv else None
+    rv = mongo.db.user.find_one({'username': username}, {'_id': 1})
+    return rv['_id'] if rv else None
 
 
 def format_datetime(timestamp):
     """Format a timestamp for display."""
-    return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d @ %H:%M')
+    return timestamp.replace(tzinfo=pytz.utc).strftime('%Y-%m-%d @ %H:%M')
 
 
 def gravatar_url(email, size=80):
     """Return the gravatar image for the given email address."""
     return 'http://www.gravatar.com/avatar/%s?d=identicon&s=%d' % \
-        (md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
+           (md5(email.strip().lower().encode('utf-8')).hexdigest(), size)
 
 
 @app.before_request
 def before_request():
-    """Make sure we are connected to the database each request and look
-    up the current user so that we know he's there.
-    """
-    g.db = connect_db()
     g.user = None
     if 'user_id' in session:
-        g.user = query_db('select * from user where user_id = ?',
-                          [session['user_id']], one=True)
-
-
-@app.after_request
-def after_request(response):
-    """Closes the database again at the end of the request."""
-    g.db.close()
-    return response
+        print(session['user_id'])
+        g.user = mongo.db.user.find_one({'_id': ObjectId(session['user_id'])})
 
 
 @app.route('/')
@@ -94,47 +54,42 @@ def timeline():
     redirect to the public timeline.  This timeline shows the user's
     messages as well as all the messages of followed users.
     """
-    print("We got a visitor from: " + str(request.remote_addr))
     if not g.user:
         return redirect(url_for('public_timeline'))
-    offset = request.args.get('offset', type=int)
-    return render_template('timeline.html', messages=query_db('''
-        select message.*, user.* from message, user
-        where message.flagged = 0 and message.author_id = user.user_id and (
-            user.user_id = ? or
-            user.user_id in (select whom_id from follower
-                                    where who_id = ?))
-        order by message.pub_date desc limit ?''',
-        [session['user_id'], session['user_id'], PER_PAGE]))
+    followed = mongo.db.follower.find_one(
+        {'who_id': ObjectId(session['user_id'])}, {'whom_id': 1})
+    if followed is None:
+        followed = {'whom_id': []}
+    messages = mongo.db.message.find(
+        {'$or': [
+            {'author_id': ObjectId(session['user_id'])},
+            {'author_id': {'$in': followed['whom_id']}}
+        ]}).sort('pub_date', -1)
+    return render_template('timeline.html', messages=messages)
 
 
 @app.route('/public')
 def public_timeline():
     """Displays the latest messages of all users."""
-    return render_template('timeline.html', messages=query_db('''
-        select message.*, user.* from message, user
-        where message.flagged = 0 and message.author_id = user.user_id
-        order by message.pub_date desc limit ?''', [PER_PAGE]))
+    messages = mongo.db.message.find().sort('pub_date', -1)
+    return render_template('timeline.html', messages=messages)
 
 
 @app.route('/<username>')
 def user_timeline(username):
     """Display's a users tweets."""
-    profile_user = query_db('select * from user where username = ?',
-                            [username], one=True)
+    profile_user = mongo.db.user.find_one({'username': username})
     if profile_user is None:
         abort(404)
     followed = False
     if g.user:
-        followed = query_db('''select 1 from follower where
-            follower.who_id = ? and follower.whom_id = ?''',
-            [session['user_id'], profile_user['user_id']], one=True) is not None
-    return render_template('timeline.html', messages=query_db('''
-            select message.*, user.* from message, user where
-            user.user_id = message.author_id and user.user_id = ?
-            order by message.pub_date desc limit ?''',
-            [profile_user['user_id'], PER_PAGE]), followed=followed,
-            profile_user=profile_user)
+        followed = mongo.db.follower.find_one(
+            {'who_id': ObjectId(session['user_id']),
+             'whom_id': {'$in': [ObjectId(profile_user['_id'])]}}) is not None
+    messages = mongo.db.message.find(
+        {'author_id': ObjectId(profile_user['_id'])}).sort('pub_date', -1)
+    return render_template('timeline.html', messages=messages,
+                           followed=followed, profile_user=profile_user)
 
 
 @app.route('/<username>/follow')
@@ -145,9 +100,9 @@ def follow_user(username):
     whom_id = get_user_id(username)
     if whom_id is None:
         abort(404)
-    g.db.execute('insert into follower (who_id, whom_id) values (?, ?)',
-                [session['user_id'], whom_id])
-    g.db.commit()
+    mongo.db.follower.update(
+        {'who_id': ObjectId(session['user_id'])},
+        {'$push': {'whom_id': whom_id}}, upsert=True)
     flash('You are now following "%s"' % username)
     return redirect(url_for('user_timeline', username=username))
 
@@ -160,9 +115,9 @@ def unfollow_user(username):
     whom_id = get_user_id(username)
     if whom_id is None:
         abort(404)
-    g.db.execute('delete from follower where who_id=? and whom_id=?',
-                [session['user_id'], whom_id])
-    g.db.commit()
+    mongo.db.follower.update_one(
+        {'who_id': ObjectId(session['user_id'])},
+        {'$pull': {'whom_id': whom_id}})
     flash('You are no longer following "%s"' % username)
     return redirect(url_for('user_timeline', username=username))
 
@@ -173,10 +128,14 @@ def add_message():
     if 'user_id' not in session:
         abort(401)
     if request.form['text']:
-        g.db.execute('''insert into message (author_id, text, pub_date, flagged)
-            values (?, ?, ?, 0)''', (session['user_id'], request.form['text'],
-                                  int(time.time())))
-        g.db.commit()
+        user = mongo.db.user.find_one(
+            {'_id': ObjectId(session['user_id'])}, {'email': 1, 'username': 1})
+        mongo.db.message.insert_one(
+            {'author_id': ObjectId(session['user_id']),
+             'email': user['email'],
+             'username': user['username'],
+             'text': request.form['text'],
+             'pub_date': datetime.datetime.utcnow()})
         flash('Your message was recorded')
     return redirect(url_for('timeline'))
 
@@ -188,16 +147,14 @@ def login():
         return redirect(url_for('timeline'))
     error = None
     if request.method == 'POST':
-        user = query_db('''select * from user where
-            username = ?''', [request.form['username']], one=True)
+        user = mongo.db.user.find_one({'username': request.form['username']})
         if user is None:
             error = 'Invalid username'
-        elif not check_password_hash(user['pw_hash'],
-                                     request.form['password']):
+        elif not check_password_hash(user['pw_hash'], request.form['password']):
             error = 'Invalid password'
         else:
             flash('You were logged in')
-            session['user_id'] = user['user_id']
+            session['user_id'] = str(user['_id'])
             return redirect(url_for('timeline'))
     return render_template('login.html', error=error)
 
@@ -211,8 +168,7 @@ def register():
     if request.method == 'POST':
         if not request.form['username']:
             error = 'You have to enter a username'
-        elif not request.form['email'] or \
-                 '@' not in request.form['email']:
+        elif not request.form['email'] or '@' not in request.form['email']:
             error = 'You have to enter a valid email address'
         elif not request.form['password']:
             error = 'You have to enter a password'
@@ -221,11 +177,10 @@ def register():
         elif get_user_id(request.form['username']) is not None:
             error = 'The username is already taken'
         else:
-            g.db.execute('''insert into user (
-                username, email, pw_hash) values (?, ?, ?)''',
-                [request.form['username'], request.form['email'],
-                 generate_password_hash(request.form['password'])])
-            g.db.commit()
+            mongo.db.user.insert_one(
+                {'username': request.form['username'],
+                 'email': request.form['email'],
+                 'pw_hash': generate_password_hash(request.form['password'])})
             flash('You were successfully registered and can login now')
             return redirect(url_for('login'))
     return render_template('register.html', error=error)
@@ -233,19 +188,15 @@ def register():
 
 @app.route('/logout')
 def logout():
-    """Logs the user out"""
+    """Logs the user out."""
     flash('You were logged out')
     session.pop('user_id', None)
     return redirect(url_for('public_timeline'))
 
 
-# add some filters to jinja and set the secret key and debug mode
-# from the configuration.
+# add some filters to jinja
 app.jinja_env.filters['datetimeformat'] = format_datetime
 app.jinja_env.filters['gravatar'] = gravatar_url
-app.secret_key = SECRET_KEY
-app.debug = DEBUG
-
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0")

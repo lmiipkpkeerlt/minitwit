@@ -1,15 +1,24 @@
 version: '3.4'
 
 services:
-  minitwit:
+  dbserver:
     build:
       context: .
-      dockerfile: ./Dockerfile.minitwit
+      dockerfile: ./docker/Dockerfile.db
     ports:
-      - 5000:5000
-    volumes:
-      - minitwit:/data
+      - "27017:27017"
+    networks:
+      - minitwit
 
-volumes:
+  webserver:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.web
+    ports:
+      - "5000:5000"
+    networks:
+        - minitwit
+
+networks:
   minitwit:
     external: false
